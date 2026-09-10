@@ -8,3 +8,4 @@ build/
 coverage/
 *.log
 .DS_Store
+qr_restaurant_backup.sql
