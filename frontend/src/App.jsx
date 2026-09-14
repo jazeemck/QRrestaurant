@@ -9,6 +9,7 @@ import {
 import CustomerMenu from './pages/CustomerMenu';
 import KitchenDashboard from './pages/KitchenDashboard';
 import AdminDashboard from './pages/AdminDashboard';
+import StaffDashboard from './pages/StaffDashboard';
 
 function HomePage() {
   return (
@@ -36,22 +37,10 @@ function HomePage() {
           boxSizing: 'border-box',
         }}
       >
-        <h1
-          style={{
-            margin: '0 0 12px',
-            fontSize: '32px',
-          }}
-        >
+        <h1 style={{ margin: '0 0 12px', fontSize: '32px' }}>
           QR Restaurant
         </h1>
-
-        <p
-          style={{
-            margin: '0',
-            color: '#666',
-            lineHeight: '1.6',
-          }}
-        >
+        <p style={{ margin: '0', color: '#666', lineHeight: '1.6' }}>
           Digital restaurant ordering and management system.
         </p>
       </div>
@@ -61,57 +50,44 @@ function HomePage() {
 
 function CustomerMenuRoute() {
   const { restaurantId, tableId } = useParams();
-
-  return (
-    <CustomerMenu
-      restaurantId={restaurantId}
-      tableId={tableId}
-    />
-  );
+  return <CustomerMenu restaurantId={restaurantId} tableId={tableId} />;
 }
 
 function KitchenDashboardRoute() {
   const { restaurantId } = useParams();
-
-  return (
-    <KitchenDashboard
-      restaurantId={restaurantId}
-    />
-  );
+  return <KitchenDashboard restaurantId={restaurantId} />;
 }
 
 function AdminDashboardRoute() {
   const { restaurantId } = useParams();
+  return <AdminDashboard restaurantId={restaurantId} />;
+}
 
-  return (
-    <AdminDashboard
-      restaurantId={restaurantId}
-    />
-  );
+function StaffDashboardRoute() {
+  const { restaurantId } = useParams();
+  return <StaffDashboard restaurantId={restaurantId} />;
 }
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route
-          path="/"
-          element={<HomePage />}
-        />
-
+        <Route path="/" element={<HomePage />} />
         <Route
           path="/r/:restaurantId/t/:tableId"
           element={<CustomerMenuRoute />}
         />
-
         <Route
           path="/kitchen/:restaurantId"
           element={<KitchenDashboardRoute />}
         />
-
         <Route
           path="/admin/:restaurantId"
           element={<AdminDashboardRoute />}
+        />
+        <Route
+          path="/staff/:restaurantId"
+          element={<StaffDashboardRoute />}
         />
       </Routes>
     </BrowserRouter>

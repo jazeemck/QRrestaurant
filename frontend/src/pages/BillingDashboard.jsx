@@ -1,175 +1,200 @@
 import React, { useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
 
 const API_BASE =
   import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
 
+function money(value) {
+  return `₹${Number(value || 0).toFixed(2)}`;
+}
+
 function formatDate(value) {
   if (!value) return '—';
-
   return new Date(value).toLocaleString('en-IN', {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
 }
 
-function money(value) {
-  return `₹${Number(value || 0).toFixed(2)}`;
-}
+function getAggregatedItems(bill) {
+  const grouped = new Map();
 
-function statusClass(status) {
-  return String(status || '')
-    .toLowerCase()
-    .replace(/\s+/g, '-');
-}
+  for (const order of bill?.orders || []) {
+    for (const item of order.items || []) {
+      const key = `${item.menu_item_id}-${Number(item.unit_price || item.price || 0).toFixed(2)}`;
 
-function paymentClass(status) {
-  return String(status || 'unpaid')
-    .toLowerCase()
-    .replace(/\s+/g, '-');
+      const existing = grouped.get(key);
+
+      if (existing) {
+        existing.quantity += Number(item.quantity || 0);
+        existing.item_total = money(
+          existing.quantity * existing.unit_price
+        );
+      } else {
+        const unitPrice = money(
+          item.unit_price ?? item.price
+        );
+        const quantity = Number(item.quantity || 0);
+
+        grouped.set(key, {
+          menu_item_id: item.menu_item_id,
+          name: item.name,
+          quantity,
+          unit_price: unitPrice,
+          item_total: money(quantity * unitPrice),
+        });
+      }
+    }
+  }
+
+  return Array.from(grouped.values());
 }
 
 export default function BillingDashboard({ restaurantId }) {
-  const [orders, setOrders] = useState([]);
+  const [bills, setBills] = useState([]);
   const [filter, setFilter] = useState('all');
   const [selectedBill, setSelectedBill] = useState(null);
-  const [paymentOrder, setPaymentOrder] = useState(null);
+  const [paymentBill, setPaymentBill] = useState(null);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [loading, setLoading] = useState(true);
   const [billLoading, setBillLoading] = useState(false);
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const loadOrders = async () => {
+  const loadBills = async () => {
     try {
       setLoading(true);
       setError('');
-
-      const response = await fetch(
-        `${API_BASE}/orders/restaurant/${restaurantId}/billing`
-      );
-
+      const response = await fetch(`${API_BASE}/bills/restaurant/${restaurantId}`);
       const data = await response.json();
-
       if (!response.ok || data.error) {
-        throw new Error(
-          data.error || 'Failed to load orders.'
-        );
+        throw new Error(data.error || 'Failed to load bills.');
       }
-
-      setOrders(Array.isArray(data) ? data : []);
+      setBills(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
-      setError(
-        err.message || 'Failed to load orders.'
-      );
+      setError(err.message || 'Failed to load bills.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadOrders();
+    loadBills();
   }, [restaurantId]);
 
-  const openBill = async (orderId) => {
+  useEffect(() => {
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || 'http://localhost:4000';
+    const socket = io(socketUrl, { transports: ['websocket', 'polling'] });
+
+    socket.on('connect', () => {
+      socket.emit('join_restaurant', restaurantId);
+    });
+
+    socket.on('bill_generated', (billEvent) => {
+      loadBills();
+      if (billEvent?.bill_id) {
+        setError('');
+      }
+    });
+
+    socket.on('bill_paid', (paymentEvent) => {
+      setBills((prev) =>
+        prev.map((bill) =>
+          Number(bill.id) === Number(paymentEvent?.bill_id)
+            ? {
+                ...bill,
+                payment_status: 'paid',
+                payment_method: paymentEvent.payment_method,
+                paid_at: paymentEvent.paid_at,
+                status: 'paid',
+              }
+            : bill
+        )
+      );
+      setSelectedBill((prev) =>
+        prev && Number(prev.bill_id) === Number(paymentEvent?.bill_id)
+          ? {
+              ...prev,
+              payment_status: 'paid',
+              payment_method: paymentEvent.payment_method,
+              paid_at: paymentEvent.paid_at,
+              status: 'paid',
+            }
+          : prev
+      );
+    });
+
+    return () => socket.disconnect();
+  }, [restaurantId]);
+
+  const openBill = async (billId) => {
     try {
       setBillLoading(true);
       setError('');
-
-      const response = await fetch(
-        `${API_BASE}/orders/bill/${orderId}`
-      );
-
+      const response = await fetch(`${API_BASE}/bills/${billId}`);
       const data = await response.json();
-
       if (!response.ok || data.error) {
-        throw new Error(
-          data.error || 'Failed to load bill.'
-        );
+        throw new Error(data.error || 'Failed to load bill.');
       }
-
       setSelectedBill(data);
     } catch (err) {
       console.error(err);
-      setError(
-        err.message || 'Failed to load bill.'
-      );
+      setError(err.message || 'Failed to load bill.');
     } finally {
       setBillLoading(false);
     }
   };
 
   const markPaymentComplete = async () => {
-    if (!paymentOrder) return;
+    if (!paymentBill) return;
 
     try {
       setPaymentLoading(true);
       setError('');
 
       const response = await fetch(
-        `${API_BASE}/orders/${paymentOrder.id}/payment`,
+        `${API_BASE}/bills/${paymentBill.id}/payment`,
         {
           method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            payment_method: paymentMethod,
-          }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payment_method: paymentMethod }),
         }
       );
 
       const data = await response.json();
-
       if (!response.ok || data.error) {
-        throw new Error(
-          data.error || 'Failed to complete payment.'
-        );
+        throw new Error(data.error || 'Failed to complete payment.');
       }
 
-      setOrders((prev) =>
-        prev.map((order) =>
-          Number(order.id) === Number(paymentOrder.id)
+      setBills((prev) =>
+        prev.map((bill) =>
+          Number(bill.id) === Number(paymentBill.id)
             ? {
-                ...order,
+                ...bill,
                 payment_status: 'paid',
-                payment_method:
-                  data.payment_method ||
-                  paymentMethod,
-                paid_at:
-                  data.paid_at ||
-                  new Date().toISOString(),
+                payment_method: data.payment_method || paymentMethod,
+                paid_at: data.paid_at || new Date().toISOString(),
+                status: 'paid',
               }
-            : order
+            : bill
         )
       );
 
-      if (
-        selectedBill &&
-        Number(selectedBill.order.id) ===
-          Number(paymentOrder.id)
-      ) {
+      if (selectedBill && Number(selectedBill.bill_id) === Number(paymentBill.id)) {
         setSelectedBill((prev) => ({
           ...prev,
-          order: {
-            ...prev.order,
-            payment_status: 'paid',
-            payment_method:
-              data.payment_method ||
-              paymentMethod,
-            paid_at:
-              data.paid_at ||
-              new Date().toISOString(),
-          },
+          payment_status: 'paid',
+          payment_method: data.payment_method || paymentMethod,
+          paid_at: data.paid_at || new Date().toISOString(),
+          status: 'paid',
         }));
       }
 
-      setPaymentOrder(null);
+      setPaymentBill(null);
     } catch (err) {
       console.error(err);
-      setError(
-        err.message || 'Failed to complete payment.'
-      );
+      setError(err.message || 'Failed to complete payment.');
     } finally {
       setPaymentLoading(false);
     }
@@ -178,1253 +203,247 @@ export default function BillingDashboard({ restaurantId }) {
   const printBill = () => {
     if (!selectedBill) return;
 
-    const printWindow = window.open(
-      '',
-      '_blank',
-      'width=480,height=800'
-    );
-
+    const printWindow = window.open('', '_blank', 'width=520,height=850');
     if (!printWindow) return;
 
-    const {
-      restaurant,
-      order,
-      totals,
-    } = selectedBill;
-
-    const rows = order.items
+    const { restaurant, totals } = selectedBill;
+    const aggregatedItems = getAggregatedItems(selectedBill);
+    const items = aggregatedItems
       .map(
         (item) => `
           <tr>
             <td>${item.name}</td>
             <td style="text-align:center">${item.quantity}</td>
-            <td style="text-align:right">${money(
-              item.unit_price
-            )}</td>
-            <td style="text-align:right">${money(
-              item.item_total
-            )}</td>
-          </tr>
-        `
+            <td style="text-align:right">${money(item.unit_price)}</td>
+            <td style="text-align:right">${money(item.item_total)}</td>
+          </tr>`
       )
       .join('');
 
     const paymentText =
-      order.payment_status === 'paid'
-        ? `Paid${order.payment_method ? ` (${order.payment_method})` : ''}`
+      selectedBill.payment_status === 'paid'
+        ? `Paid${selectedBill.payment_method ? ` (${selectedBill.payment_method.toUpperCase()})` : ''}`
         : 'Unpaid';
 
     printWindow.document.write(`
       <!doctype html>
       <html>
-        <head>
-          <title>Bill #${order.order_number}</title>
-          <style>
-            *{box-sizing:border-box}
-            body{
-              font-family:Arial,sans-serif;
-              margin:0;
-              padding:24px;
-              color:#17201d;
-              font-size:12px
-            }
-            .receipt{
-              max-width:420px;
-              margin:auto
-            }
-            .center{text-align:center}
-            .logo{
-              max-width:90px;
-              max-height:70px;
-              object-fit:contain;
-              margin-bottom:8px
-            }
-            h1{
-              font-size:20px;
-              margin:0 0 4px
-            }
-            .muted{color:#666}
-            .meta{
-              margin:18px 0;
-              border-top:1px dashed #aaa;
-              border-bottom:1px dashed #aaa;
-              padding:10px 0;
-              display:grid;
-              grid-template-columns:1fr 1fr;
-              gap:5px
-            }
-            table{
-              width:100%;
-              border-collapse:collapse;
-              margin-top:12px
-            }
-            th,td{
-              padding:7px 3px;
-              border-bottom:1px solid #eee
-            }
-            th{
-              text-align:left;
-              font-size:10px;
-              text-transform:uppercase
-            }
-            .totals{
-              margin-top:14px;
-              margin-left:auto;
-              width:65%
-            }
-            .total-row{
-              display:flex;
-              justify-content:space-between;
-              padding:4px 0
-            }
-            .grand{
-              font-weight:800;
-              font-size:16px;
-              border-top:1px solid #222;
-              margin-top:5px;
-              padding-top:8px
-            }
-            .paid{
-              margin-top:16px;
-              text-align:center;
-              font-weight:800
-            }
-            .thanks{
-              text-align:center;
-              margin-top:24px
-            }
-            @media print{
-              body{padding:0}
-              .receipt{max-width:none}
-            }
-          </style>
-        </head>
-        <body>
-          <div class="receipt">
-            <div class="center">
-              ${
-                restaurant.logo_url
-                  ? `<img class="logo" src="${restaurant.logo_url}" />`
-                  : ''
-              }
-              <h1>${restaurant.name || 'Restaurant'}</h1>
-              ${
-                restaurant.address
-                  ? `<div class="muted">${restaurant.address}</div>`
-                  : ''
-              }
-              ${
-                restaurant.phone
-                  ? `<div class="muted">${restaurant.phone}</div>`
-                  : ''
-              }
-            </div>
-
-            <div class="meta">
-              <div>
-                <b>Bill #</b><br/>
-                ${order.order_number}
-              </div>
-              <div>
-                <b>Table</b><br/>
-                ${order.table_number}
-              </div>
-              <div>
-                <b>Date</b><br/>
-                ${formatDate(order.created_at)}
-              </div>
-              <div>
-                <b>Payment</b><br/>
-                ${paymentText}
-              </div>
-            </div>
-
-            <table>
-              <thead>
-                <tr>
-                  <th>Item</th>
-                  <th>Qty</th>
-                  <th>Price</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
-
-            <div class="totals">
-              <div class="total-row">
-                <span>Subtotal</span>
-                <b>${money(totals.subtotal)}</b>
-              </div>
-              <div class="total-row">
-                <span>Tax</span>
-                <b>${money(totals.tax)}</b>
-              </div>
-              <div class="total-row">
-                <span>Discount</span>
-                <b>- ${money(totals.discount)}</b>
-              </div>
-              <div class="total-row grand">
-                <span>Grand Total</span>
-                <b>${money(totals.grand_total)}</b>
-              </div>
-            </div>
-
-            <div class="paid">${paymentText}</div>
-
-            <div class="thanks">
-              Thank you for dining with us!
-            </div>
+      <head>
+        <title>Bill #${selectedBill.bill_number}</title>
+        <style>
+          *{box-sizing:border-box}
+          body{font-family:Arial,sans-serif;margin:0;padding:24px;color:#17201d;font-size:12px}
+          .receipt{max-width:430px;margin:auto}
+          .center{text-align:center}
+          .logo{max-width:90px;max-height:70px;object-fit:contain;margin-bottom:8px}
+          h1{font-size:20px;margin:0 0 4px}.muted{color:#666}
+          .meta{margin:18px 0;border-top:1px dashed #aaa;border-bottom:1px dashed #aaa;padding:10px 0;display:grid;grid-template-columns:1fr 1fr;gap:6px}
+          .order-label{margin-top:14px;font-weight:700}
+          table{width:100%;border-collapse:collapse;margin-top:7px}
+          th,td{padding:7px 3px;border-bottom:1px solid #eee;text-align:left}
+          th{font-size:10px;text-transform:uppercase}th:last-child,td:last-child{text-align:right}
+          .totals{margin-top:14px;margin-left:auto;width:66%}.row{display:flex;justify-content:space-between;padding:4px 0}
+          .grand{font-weight:800;font-size:16px;border-top:1px solid #222;margin-top:5px;padding-top:8px}
+          .payment{margin-top:16px;text-align:center;font-weight:800}.thanks{text-align:center;margin-top:22px}
+          @media print{body{padding:0}}
+        </style>
+      </head>
+      <body>
+        <div class="receipt">
+          <div class="center">
+            ${restaurant?.logo_url ? `<img class="logo" src="${restaurant.logo_url}" />` : ''}
+            <h1>${restaurant?.name || 'Restaurant'}</h1>
+            ${restaurant?.address ? `<div class="muted">${restaurant.address}</div>` : ''}
+            ${restaurant?.phone ? `<div class="muted">${restaurant.phone}</div>` : ''}
           </div>
-
-          <script>
-            window.onload = () => {
-              window.print();
-              window.onafterprint = () => window.close();
-            };
-          </script>
-        </body>
+          <div class="meta">
+            <div><b>Bill #</b><br/>${selectedBill.bill_number}</div>
+            <div><b>Table</b><br/>${selectedBill.table?.table_number}</div>
+            <div><b>Date</b><br/>${formatDate(selectedBill.created_at)}</div>
+            <div><b>Payment</b><br/>${paymentText}</div>
+          </div>
+          <table>
+            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+            <tbody>${items}</tbody>
+          </table>
+          <div class="totals">
+            <div class="row"><span>Subtotal</span><b>${money(totals?.subtotal)}</b></div>
+            <div class="row"><span>Tax</span><b>${money(totals?.tax)}</b></div>
+            <div class="row"><span>Discount</span><b>- ${money(totals?.discount)}</b></div>
+            <div class="row grand"><span>Grand Total</span><b>${money(totals?.grand_total)}</b></div>
+          </div>
+          <div class="payment">${paymentText}</div>
+          <div class="thanks">Thank you for dining with us!</div>
+        </div>
+        <script>window.onload=()=>{window.print();window.onafterprint=()=>window.close();}</script>
+      </body>
       </html>
     `);
-
     printWindow.document.close();
   };
 
-  const filteredOrders = orders.filter(
-    (order) =>
-      filter === 'all' ||
-      String(order.status).toLowerCase() === filter
-  );
+  const filteredBills = bills.filter((bill) => {
+    if (filter === 'unpaid') return bill.payment_status !== 'paid';
+    if (filter === 'paid') return bill.payment_status === 'paid';
+    return true;
+  });
 
   return (
     <div className="billing-dashboard">
       <style>{`
         .billing-dashboard{width:100%}
-        .billing-head{
-          display:flex;
-          align-items:flex-end;
-          justify-content:space-between;
-          gap:20px;
-          margin-bottom:24px
-        }
-        .billing-head h2{
-          margin:0;
-          font-size:28px
-        }
-        .billing-head p{
-          margin:7px 0 0;
-          color:#707a76;
-          font-size:12px
-        }
-        .billing-refresh{
-          border:1px solid #dce2df;
-          background:#fff;
-          border-radius:9px;
-          padding:10px 14px;
-          font-weight:800;
-          font-size:11px;
-          cursor:pointer
-        }
-        .billing-filters{
-          display:flex;
-          gap:8px;
-          flex-wrap:wrap;
-          margin-bottom:16px
-        }
-        .billing-filter{
-          border:1px solid #dce2df;
-          background:#fff;
-          border-radius:9px;
-          padding:9px 13px;
-          font-size:11px;
-          font-weight:800;
-          cursor:pointer
-        }
-        .billing-filter.active{
-          background:#0f5a4f;
-          color:#fff;
-          border-color:#0f5a4f
-        }
-        .billing-list{
-          display:grid;
-          gap:10px
-        }
-        .billing-row{
-          display:grid;
-          grid-template-columns:70px 1fr 100px 95px 115px 100px 105px;
-          align-items:center;
-          gap:13px;
-          background:#fff;
-          border:1px solid #e4e9e6;
-          border-radius:14px;
-          padding:15px 16px;
-          box-shadow:0 5px 18px rgba(25,48,42,.035)
-        }
-        .billing-id{font-weight:900}
-        .billing-table{
-          font-weight:800;
-          font-size:12px
-        }
-        .billing-date{
-          font-size:10px;
-          color:#707a76
-        }
-        .billing-status,
-        .billing-payment{
-          display:inline-flex;
-          width:max-content;
-          padding:5px 8px;
-          border-radius:999px;
-          font-size:9px;
-          font-weight:900;
-          text-transform:capitalize
-        }
-        .billing-status{
-          background:#f0f2f1;
-        }
-        .billing-status.completed{
-          background:#e8f5e9;
-          color:#2e7d32
-        }
-        .billing-status.cancelled{
-          background:#ffebee;
-          color:#c62828
-        }
-        .billing-status.pending,
-        .billing-status.active{
-          background:#fff7e6;
-          color:#9a6500
-        }
-        .billing-payment.paid{
-          background:#e8f5e9;
-          color:#2e7d32
-        }
-        .billing-payment.unpaid{
-          background:#fff4e5;
-          color:#a15c00
-        }
-        .billing-total{
-          font-weight:900;
-          text-align:right
-        }
-        .billing-view,
-        .billing-pay{
-          border:0;
-          border-radius:9px;
-          padding:9px 10px;
-          font-size:10px;
-          font-weight:850;
-          cursor:pointer;
-          white-space:nowrap
-        }
-        .billing-view{
-          background:#0f5a4f;
-          color:#fff
-        }
-        .billing-pay{
-          background:#173c35;
-          color:#fff
-        }
-        .billing-pay:disabled,
-        .billing-view:disabled{
-          opacity:.55;
-          cursor:not-allowed
-        }
-        .billing-paid-note{
-          display:inline-flex;
-          align-items:center;
-          justify-content:center;
-          min-width:70px;
-          box-sizing:border-box;
-          border-radius:9px;
-          padding:9px 10px;
-          background:#e8f5e9;
-          color:#2e7d32;
-          font-size:10px;
-          font-weight:850;
-          white-space:nowrap;
-          text-align:center
-        }
-        .billing-empty,
-        .billing-loading{
-          padding:35px;
-          text-align:center;
-          background:#fff;
-          border:1px solid #e4e9e6;
-          border-radius:14px;
-          color:#707a76;
-          font-size:12px
-        }
-        .billing-error{
-          padding:12px;
-          background:#ffebee;
-          color:#c62828;
-          border:1px solid #f2c7cc;
-          border-radius:10px;
-          margin-bottom:15px;
-          font-size:12px;
-          font-weight:700
-        }
-
-        .bill-overlay{
-          position:fixed;
-          inset:0;
-          background:rgba(10,25,21,.48);
-          z-index:100;
-          display:flex;
-          justify-content:center;
-          align-items:flex-start;
-          padding:35px 15px;
-          overflow:auto
-        }
-        .bill-modal{
-          width:min(520px,100%);
-          background:#fff;
-          border-radius:18px;
-          box-shadow:0 25px 70px rgba(0,0,0,.25);
-          overflow:hidden
-        }
-        .bill-modal-head{
-          display:flex;
-          justify-content:space-between;
-          align-items:center;
-          padding:16px 18px;
-          border-bottom:1px solid #e4e9e6
-        }
-        .bill-modal-head strong{font-size:14px}
-        .bill-close{
-          border:0;
-          background:#f2f4f3;
-          width:32px;
-          height:32px;
-          border-radius:50%;
-          cursor:pointer;
-          font-size:18px
-        }
-        .bill-paper{padding:25px}
-        .bill-brand{text-align:center}
-        .bill-logo{
-          max-width:90px;
-          max-height:70px;
-          object-fit:contain;
-          margin-bottom:8px
-        }
-        .bill-brand h3{
-          margin:0;
-          font-size:21px
-        }
-        .bill-brand p{
-          margin:4px 0;
-          color:#707a76;
-          font-size:10px
-        }
-        .bill-meta{
-          display:grid;
-          grid-template-columns:1fr 1fr;
-          gap:10px;
-          margin:18px 0;
-          padding:13px 0;
-          border-top:1px dashed #bbb;
-          border-bottom:1px dashed #bbb
-        }
-        .bill-meta-label{
-          font-size:9px;
-          color:#707a76;
-          text-transform:uppercase;
-          font-weight:800
-        }
-        .bill-meta-value{
-          margin-top:3px;
-          font-size:11px;
-          font-weight:800
-        }
-        .bill-items{
-          width:100%;
-          border-collapse:collapse
-        }
-        .bill-items th,
-        .bill-items td{
-          padding:9px 3px;
-          border-bottom:1px solid #edf0ee;
-          font-size:11px;
-          text-align:left
-        }
-        .bill-items th{
-          font-size:9px;
-          color:#707a76;
-          text-transform:uppercase
-        }
-        .bill-items th:not(:first-child),
-        .bill-items td:not(:first-child){
-          text-align:right
-        }
-        .bill-totals{
-          margin:15px 0 0 auto;
-          width:60%
-        }
-        .bill-total-row{
-          display:flex;
-          justify-content:space-between;
-          padding:5px 0;
-          font-size:11px
-        }
-        .bill-grand{
-          border-top:1px solid #17201d;
-          margin-top:5px;
-          padding-top:9px;
-          font-size:15px;
-          font-weight:900
-        }
-        .bill-payment-box{
-          margin-top:16px;
-          padding:12px;
-          border-radius:11px;
-          background:#f4f8f6;
-          border:1px solid #dfe9e4;
-          display:flex;
-          justify-content:space-between;
-          align-items:center;
-          gap:10px
-        }
-        .bill-payment-label{
-          color:#707a76;
-          font-size:9px;
-          font-weight:800;
-          text-transform:uppercase
-        }
-        .bill-payment-value{
-          margin-top:3px;
-          font-size:12px;
-          font-weight:900
-        }
-        .bill-paid{
-          color:#2e7d32
-        }
-        .bill-unpaid{
-          color:#a15c00
-        }
-        .bill-thanks{
-          text-align:center;
-          color:#707a76;
-          font-size:10px;
-          margin-top:22px
-        }
-        .bill-actions{
-          display:flex;
-          gap:9px;
-          padding:15px 18px;
-          border-top:1px solid #e4e9e6
-        }
-        .bill-action{
-          flex:1;
-          border:0;
-          border-radius:9px;
-          padding:11px;
-          font-size:11px;
-          font-weight:850;
-          cursor:pointer
-        }
-        .bill-action.print{
-          background:#0f5a4f;
-          color:#fff
-        }
-        .bill-action.secondary{
-          background:#f1f3f2;
-          color:#17201d
-        }
-
-        .payment-overlay{
-          position:fixed;
-          inset:0;
-          z-index:120;
-          background:rgba(10,25,21,.52);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          padding:20px
-        }
-        .payment-modal{
-          width:min(420px,100%);
-          background:#fff;
-          border-radius:18px;
-          padding:22px;
-          box-shadow:0 25px 70px rgba(0,0,0,.25)
-        }
-        .payment-title{
-          margin:0;
-          font-size:20px
-        }
-        .payment-subtitle{
-          margin:6px 0 18px;
-          color:#707a76;
-          font-size:11px
-        }
-        .payment-amount{
-          padding:15px;
-          border-radius:12px;
-          background:#f4f8f6;
-          text-align:center;
-          margin-bottom:18px
-        }
-        .payment-amount small{
-          display:block;
-          color:#707a76;
-          font-size:9px;
-          font-weight:800;
-          text-transform:uppercase
-        }
-        .payment-amount strong{
-          display:block;
-          margin-top:4px;
-          font-size:25px
-        }
-        .payment-methods{
-          display:grid;
-          grid-template-columns:repeat(3,1fr);
-          gap:8px
-        }
-        .payment-method{
-          border:1px solid #dce2df;
-          background:#fff;
-          border-radius:10px;
-          padding:12px 7px;
-          cursor:pointer;
-          font-size:11px;
-          font-weight:800
-        }
-        .payment-method.selected{
-          border-color:#0f5a4f;
-          background:#edf8f5;
-          color:#0f5a4f
-        }
-        .payment-actions{
-          display:flex;
-          gap:8px;
-          margin-top:18px
-        }
-        .payment-button{
-          flex:1;
-          border:0;
-          border-radius:10px;
-          padding:12px;
-          cursor:pointer;
-          font-size:11px;
-          font-weight:850
-        }
-        .payment-button.cancel{
-          background:#f1f3f2;
-          color:#17201d
-        }
-        .payment-button.confirm{
-          background:#0f5a4f;
-          color:#fff
-        }
-        .payment-button:disabled{
-          opacity:.55;
-          cursor:not-allowed
-        }
-
-        @media(max-width:1100px){
-          .billing-row{
-            grid-template-columns:60px 1fr 90px 90px 100px 90px 95px
-          }
-        }
-        @media(max-width:900px){
-          .billing-row{
-            grid-template-columns:70px 1fr 100px 100px;
-          }
-          .billing-row > :nth-child(4){
-            display:none
-          }
-          .billing-total{text-align:left}
-        }
-        @media(max-width:600px){
-          .billing-head{
-            align-items:flex-start;
-            flex-direction:column
-          }
-          .billing-head h2{font-size:24px}
-
-          /* Compact mobile billing card: keep the amount and actions
-             inside the white card instead of letting the action group
-             overflow its right edge. */
-          .billing-list{
-            width:100%;
-            min-width:0;
-          }
-
-          .billing-row{
-            grid-template-columns:minmax(70px,1fr) auto;
-            gap:8px;
-            width:100%;
-            min-width:0;
-            box-sizing:border-box;
-            padding:15px 12px;
-          }
-
-          .billing-row > :nth-child(1),
-          .billing-row > :nth-child(2),
-          .billing-row > :nth-child(3),
-          .billing-row > :nth-child(4),
-          .billing-row > :nth-child(5){
-            display:none
-          }
-
-          .billing-row > :nth-child(6){
-            grid-column:1;
-            min-width:0;
-            text-align:left
-          }
-
-          .billing-row > :nth-child(7){
-            grid-column:2;
-            min-width:0;
-            display:flex !important;
-            gap:6px;
-            align-items:center;
-            justify-content:flex-end;
-          }
-
-          .billing-view,
-          .billing-pay,
-          .billing-paid-note{
-            width:auto;
-            flex:0 0 auto
-          }
-
-          .billing-view,
-          .billing-pay,
-          .billing-paid-note{
-            padding:9px 10px
-          }
-
-          .bill-paper{padding:18px}
-          .bill-totals{width:75%}
-        }
+        .billing-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:24px}
+        .billing-head h2{margin:0;font-size:28px}.billing-head p{margin:7px 0 0;color:#707a76;font-size:12px}
+        .billing-refresh{border:1px solid #dce2df;background:#fff;border-radius:9px;padding:10px 14px;font-weight:800;font-size:11px;cursor:pointer}
+        .billing-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+        .billing-filter{border:1px solid #dce2df;background:#fff;border-radius:9px;padding:9px 13px;font-size:11px;font-weight:800;cursor:pointer}
+        .billing-filter.active{background:#0f5a4f;color:#fff;border-color:#0f5a4f}
+        .billing-list{display:grid;gap:10px}
+        .billing-row{display:grid;grid-template-columns:85px 85px 1fr 95px 100px 105px 105px 100px;align-items:center;gap:12px;background:#fff;border:1px solid #e4e9e6;border-radius:14px;padding:15px 16px;box-shadow:0 5px 18px rgba(25,48,42,.035)}
+        .billing-id{font-weight:900}.billing-table{font-weight:800;font-size:12px}.billing-date{font-size:10px;color:#707a76}.billing-count{font-size:11px;color:#66716d}
+        .billing-payment{display:inline-flex;width:max-content;padding:5px 8px;border-radius:999px;font-size:9px;font-weight:900;text-transform:capitalize}.billing-payment.paid{background:#e8f5e9;color:#2e7d32}.billing-payment.unpaid{background:#fff4e5;color:#a15c00}
+        .billing-total{font-weight:900;text-align:right}.billing-view,.billing-pay{border:0;border-radius:9px;padding:9px 10px;font-size:10px;font-weight:850;cursor:pointer;white-space:nowrap}.billing-view{background:#0f5a4f;color:#fff}.billing-pay{background:#173c35;color:#fff}.billing-paid-note{display:inline-flex;justify-content:center;border-radius:9px;padding:9px 10px;background:#e8f5e9;color:#2e7d32;font-size:10px;font-weight:850}
+        .billing-empty,.billing-loading{padding:35px;text-align:center;background:#fff;border:1px solid #e4e9e6;border-radius:14px;color:#707a76;font-size:12px}.billing-error{padding:12px;background:#ffebee;color:#c62828;border:1px solid #f2c7cc;border-radius:10px;margin-bottom:15px;font-size:12px;font-weight:700}
+        .bill-overlay{position:fixed;inset:0;background:rgba(10,25,21,.48);z-index:100;display:flex;justify-content:center;align-items:flex-start;padding:35px 15px;overflow:auto}.bill-modal{width:min(620px,100%);background:#fff;border-radius:18px;box-shadow:0 25px 70px rgba(0,0,0,.25);overflow:hidden}.bill-modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid #e4e9e6}.bill-modal-head strong{font-size:14px}.bill-close{border:0;background:#f2f4f3;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:18px}.bill-paper{padding:25px}.bill-brand{text-align:center}.bill-logo{max-width:90px;max-height:70px;object-fit:contain;margin-bottom:8px}.bill-brand h3{margin:0;font-size:21px}.bill-brand p{margin:4px 0;color:#707a76;font-size:10px}.bill-meta{margin:18px 0;border-top:1px dashed #aaa;border-bottom:1px dashed #aaa;padding:10px 0;display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px}.bill-order-block{margin-top:16px}.bill-order-title{font-size:11px;font-weight:900;margin-bottom:5px}.bill-paper table{width:100%;border-collapse:collapse;font-size:10px}.bill-paper th,.bill-paper td{padding:7px 3px;border-bottom:1px solid #eee;text-align:left}.bill-paper th:last-child,.bill-paper td:last-child{text-align:right}.bill-totals{margin:14px 0 0 auto;width:65%}.bill-total-row{display:flex;justify-content:space-between;padding:4px 0}.bill-total-row.grand{font-weight:900;font-size:16px;border-top:1px solid #222;margin-top:4px;padding-top:8px}.bill-payment{text-align:center;font-weight:900;margin-top:14px}.bill-modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid #e4e9e6}.bill-action{border:0;border-radius:9px;padding:9px 13px;font-size:10px;font-weight:850;cursor:pointer}.bill-action.light{background:#eef1ef;color:#26332f}.bill-action.primary{background:#0f5a4f;color:#fff}.bill-action:disabled{opacity:.55;cursor:not-allowed}
+        .payment-overlay{position:fixed;inset:0;background:rgba(10,25,21,.48);z-index:120;display:flex;align-items:center;justify-content:center;padding:15px}.payment-modal{width:min(390px,100%);background:#fff;border-radius:16px;padding:20px;box-shadow:0 25px 70px rgba(0,0,0,.25)}.payment-modal h3{margin:0 0 6px;font-size:16px}.payment-modal p{margin:0 0 16px;color:#68736f;font-size:11px}.payment-method-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.payment-method{border:1px solid #dfe5e2;background:#fff;border-radius:9px;padding:10px;font-size:11px;font-weight:800;cursor:pointer}.payment-method.active{background:#173c35;color:#fff;border-color:#173c35}.payment-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+        @media(max-width:950px){.billing-row{grid-template-columns:70px 70px 1fr 90px 90px 95px}.billing-row>*:nth-child(6){display:none}.billing-row>*:nth-child(7){display:none}}
+        @media(max-width:650px){.billing-head{align-items:flex-start;flex-direction:column}.billing-row{grid-template-columns:1fr 1fr;gap:9px}.billing-row>*{text-align:left!important}.billing-row .billing-total{grid-column:2;text-align:right!important}.bill-meta{grid-template-columns:1fr}.bill-modal-foot{flex-wrap:wrap}.payment-method-grid{grid-template-columns:1fr}}
       `}</style>
 
       <div className="billing-head">
         <div>
-          <div className="admin-eyebrow">
-            ORDERS & BILLING
-          </div>
-
-          <h2>Billing</h2>
-
-          <p>
-            View orders, generate bills and record customer
-            payments.
-          </p>
+          <h2>Billing & Orders</h2>
+          <p>Generated bills from completed table service.</p>
         </div>
-
-        <button
-          className="billing-refresh"
-          onClick={loadOrders}
-        >
-          ↻ Refresh
-        </button>
+        <button className="billing-refresh" onClick={loadBills}>Refresh</button>
       </div>
 
-      {error && (
-        <div className="billing-error">
-          {error}
-        </div>
-      )}
+      {error && <div className="billing-error">{error}</div>}
 
       <div className="billing-filters">
-        {[
-          'all',
-          'completed',
-          'active',
-          'pending',
-          'cancelled',
-        ].map((item) => (
+        {['all', 'unpaid', 'paid'].map((value) => (
           <button
-            key={item}
-            className={`billing-filter ${
-              filter === item ? 'active' : ''
-            }`}
-            onClick={() => setFilter(item)}
+            key={value}
+            className={`billing-filter ${filter === value ? 'active' : ''}`}
+            onClick={() => setFilter(value)}
           >
-            {item === 'all'
-              ? 'All'
-              : item[0].toUpperCase() + item.slice(1)}
+            {value === 'all' ? 'All Bills' : value === 'unpaid' ? 'Unpaid' : 'Paid'}
           </button>
         ))}
       </div>
 
       {loading ? (
-        <div className="billing-loading">
-          Loading orders…
-        </div>
-      ) : filteredOrders.length === 0 ? (
-        <div className="billing-empty">
-          No orders found for this filter.
-        </div>
+        <div className="billing-loading">Loading bills…</div>
+      ) : filteredBills.length === 0 ? (
+        <div className="billing-empty">No generated bills found.</div>
       ) : (
         <div className="billing-list">
-          <div
-            className="billing-row"
-            style={{
-              background: 'transparent',
-              boxShadow: 'none',
-              border: 0,
-              padding: '0 16px',
-              fontSize: 9,
-              color: '#707a76',
-              fontWeight: 900,
-            }}
-          >
-            <span>ORDER</span>
-            <span>TABLE / DATE</span>
-            <span>STATUS</span>
-            <span>PAYMENT</span>
-            <span></span>
-            <span
-              style={{
-                textAlign: 'right',
-              }}
-            >
-              TOTAL
-            </span>
-            <span></span>
-          </div>
-
-          {filteredOrders.map((order) => {
-            const isCompleted =
-              String(order.status).toLowerCase() ===
-              'completed';
-
-            const isPaid =
-              String(
-                order.payment_status || 'unpaid'
-              ).toLowerCase() === 'paid';
-
-            return (
-              <div
-                className="billing-row"
-                key={order.id}
-              >
-                <div className="billing-id">
-                  #{order.id}
-                </div>
-
-                <div>
-                  <div className="billing-table">
-                    Table {order.table_number ?? '—'}
-                  </div>
-
-                  <div className="billing-date">
-                    {formatDate(order.created_at)}
-                  </div>
-                </div>
-
-                <span
-                  className={`billing-status ${statusClass(
-                    order.status
-                  )}`}
-                >
-                  {order.status}
-                </span>
-
-                <span
-                  className={`billing-payment ${paymentClass(
-                    order.payment_status
-                  )}`}
-                >
-                  {isPaid
-                    ? `Paid${
-                        order.payment_method
-                          ? ` • ${order.payment_method}`
-                          : ''
-                      }`
-                    : 'Unpaid'}
-                </span>
-
-                <span />
-
-                <div className="billing-total">
-                  {money(order.total)}
-                </div>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: 6,
-                    alignItems: 'center',
-                  }}
-                >
-                  <button
-                    className="billing-view"
-                    onClick={() =>
-                      openBill(order.id)
-                    }
-                    disabled={billLoading}
-                  >
-                    View Bill
-                  </button>
-
-                  {isCompleted && !isPaid ? (
-                    <button
-                      className="billing-pay"
-                      onClick={() =>
-                        setPaymentOrder(order)
-                      }
-                    >
-                      Mark Paid
-                    </button>
-                  ) : (
-                    isPaid && (
-                      <span className="billing-paid-note">
-                        ✓ Paid
-                      </span>
-                    )
-                  )}
-                </div>
+          {filteredBills.map((bill) => (
+            <div className="billing-row" key={bill.id}>
+              <div className="billing-id">Bill #{bill.bill_number || bill.id}</div>
+              <div className="billing-table">Table {bill.table_number}</div>
+              <div>
+                <div className="billing-date">{formatDate(bill.created_at)}</div>
+                <div className="billing-count">{bill.order_count || 0} order(s)</div>
               </div>
-            );
-          })}
+              <div className="billing-payment">{bill.status}</div>
+              <div className={`billing-payment ${bill.payment_status === 'paid' ? 'paid' : 'unpaid'}`}>
+                {bill.payment_status || 'unpaid'}
+              </div>
+              <div className="billing-date">{bill.payment_method ? bill.payment_method.toUpperCase() : '—'}</div>
+              <div className="billing-total">{money(bill.total)}</div>
+              <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button className="billing-view" onClick={() => openBill(bill.id)}>View Bill</button>
+                {bill.payment_status !== 'paid' ? (
+                  <button className="billing-pay" onClick={() => setPaymentBill(bill)}>Mark Paid</button>
+                ) : (
+                  <span className="billing-paid-note">Paid</span>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
       {selectedBill && (
-        <div
-          className="bill-overlay"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setSelectedBill(null);
-            }
-          }}
-        >
+        <div className="bill-overlay" onMouseDown={(e) => e.target === e.currentTarget && !billLoading && setSelectedBill(null)}>
           <div className="bill-modal">
             <div className="bill-modal-head">
-              <strong>
-                Bill #
-                {selectedBill.order.order_number}
-              </strong>
-
-              <button
-                className="bill-close"
-                onClick={() =>
-                  setSelectedBill(null)
-                }
-              >
-                ×
-              </button>
+              <strong>Bill #{selectedBill.bill_number} · Table {selectedBill.table?.table_number}</strong>
+              <button className="bill-close" onClick={() => setSelectedBill(null)}>×</button>
             </div>
-
             <div className="bill-paper">
               <div className="bill-brand">
-                {selectedBill.restaurant
-                  .logo_url && (
-                  <img
-                    className="bill-logo"
-                    src={
-                      selectedBill.restaurant
-                        .logo_url
-                    }
-                    alt="Restaurant logo"
-                  />
-                )}
-
-                <h3>
-                  {selectedBill.restaurant.name ||
-                    'Restaurant'}
-                </h3>
-
-                {selectedBill.restaurant
-                  .address && (
-                  <p>
-                    {
-                      selectedBill.restaurant
-                        .address
-                    }
-                  </p>
-                )}
-
-                {selectedBill.restaurant
-                  .phone && (
-                  <p>
-                    {
-                      selectedBill.restaurant
-                        .phone
-                    }
-                  </p>
-                )}
+                {selectedBill.restaurant?.logo_url && <img className="bill-logo" src={selectedBill.restaurant.logo_url} alt="" />}
+                <h3>{selectedBill.restaurant?.name || 'Restaurant'}</h3>
+                {selectedBill.restaurant?.address && <p>{selectedBill.restaurant.address}</p>}
+                {selectedBill.restaurant?.phone && <p>{selectedBill.restaurant.phone}</p>}
               </div>
 
               <div className="bill-meta">
-                <div>
-                  <div className="bill-meta-label">
-                    Bill
-                  </div>
-                  <div className="bill-meta-value">
-                    #
-                    {
-                      selectedBill.order
-                        .order_number
-                    }
-                  </div>
-                </div>
-
-                <div>
-                  <div className="bill-meta-label">
-                    Table
-                  </div>
-                  <div className="bill-meta-value">
-                    Table{' '}
-                    {
-                      selectedBill.order
-                        .table_number
-                    }
-                  </div>
-                </div>
-
-                <div>
-                  <div className="bill-meta-label">
-                    Date
-                  </div>
-                  <div className="bill-meta-value">
-                    {formatDate(
-                      selectedBill.order
-                        .created_at
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="bill-meta-label">
-                    Status
-                  </div>
-                  <div className="bill-meta-value">
-                    {
-                      selectedBill.order
-                        .status
-                    }
-                  </div>
-                </div>
+                <div><b>Bill #</b><br/>{selectedBill.bill_number}</div>
+                <div><b>Table</b><br/>{selectedBill.table?.table_number}</div>
+                <div><b>Generated</b><br/>{formatDate(selectedBill.created_at)}</div>
+                <div><b>Payment</b><br/>{selectedBill.payment_status}{selectedBill.payment_method ? ` · ${selectedBill.payment_method.toUpperCase()}` : ''}</div>
               </div>
 
-              <table className="bill-items">
-                <thead>
-                  <tr>
-                    <th>Item</th>
-                    <th>Qty</th>
-                    <th>Price</th>
-                    <th>Total</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {selectedBill.order.items.map(
-                    (item) => (
-                      <tr
-                        key={
-                          item.id ??
-                          item.order_item_id
-                        }
-                      >
+              <div className="bill-order-block">
+                <table>
+                  <thead>
+                    <tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr>
+                  </thead>
+                  <tbody>
+                    {getAggregatedItems(selectedBill).map((item) => (
+                      <tr key={`${item.menu_item_id}-${item.unit_price}`}>
                         <td>{item.name}</td>
                         <td>{item.quantity}</td>
-                        <td>
-                          {money(item.unit_price)}
-                        </td>
-                        <td>
-                          {money(item.item_total)}
-                        </td>
+                        <td>{money(item.unit_price)}</td>
+                        <td>{money(item.item_total)}</td>
                       </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
               <div className="bill-totals">
-                <div className="bill-total-row">
-                  <span>Subtotal</span>
-                  <b>
-                    {money(
-                      selectedBill.totals
-                        .subtotal
-                    )}
-                  </b>
-                </div>
-
-                <div className="bill-total-row">
-                  <span>Tax</span>
-                  <b>
-                    {money(
-                      selectedBill.totals.tax
-                    )}
-                  </b>
-                </div>
-
-                <div className="bill-total-row">
-                  <span>Discount</span>
-                  <b>
-                    -{' '}
-                    {money(
-                      selectedBill.totals
-                        .discount
-                    )}
-                  </b>
-                </div>
-
-                <div className="bill-total-row bill-grand">
-                  <span>Grand Total</span>
-                  <b>
-                    {money(
-                      selectedBill.totals
-                        .grand_total
-                    )}
-                  </b>
-                </div>
+                <div className="bill-total-row"><span>Subtotal</span><b>{money(selectedBill.totals?.subtotal)}</b></div>
+                <div className="bill-total-row"><span>Tax</span><b>{money(selectedBill.totals?.tax)}</b></div>
+                <div className="bill-total-row"><span>Discount</span><b>- {money(selectedBill.totals?.discount)}</b></div>
+                <div className="bill-total-row grand"><span>Grand Total</span><b>{money(selectedBill.totals?.grand_total)}</b></div>
               </div>
-
-              <div className="bill-payment-box">
-                <div>
-                  <div className="bill-payment-label">
-                    Payment Status
-                  </div>
-
-                  <div
-                    className={`bill-payment-value ${
-                      selectedBill.order
-                        .payment_status ===
-                      'paid'
-                        ? 'bill-paid'
-                        : 'bill-unpaid'
-                    }`}
-                  >
-                    {selectedBill.order
-                      .payment_status ===
-                    'paid'
-                      ? `Paid${
-                          selectedBill.order
-                            .payment_method
-                            ? ` • ${selectedBill.order.payment_method}`
-                            : ''
-                        }`
-                      : 'Unpaid'}
-                  </div>
-                </div>
-
-                {selectedBill.order
-                  .payment_status !== 'paid' &&
-                  String(
-                    selectedBill.order.status
-                  ).toLowerCase() ===
-                    'completed' && (
-                    <button
-                      className="billing-pay"
-                      onClick={() => {
-                        setPaymentOrder({
-                          id: selectedBill.order
-                            .id,
-                          total:
-                            selectedBill
-                              .totals
-                              .grand_total,
-                        });
-                      }}
-                    >
-                      Mark Paid
-                    </button>
-                  )}
-              </div>
-
-              <div className="bill-thanks">
-                Thank you for dining with us!
-              </div>
+              <div className="bill-payment">{selectedBill.payment_status === 'paid' ? `PAID${selectedBill.payment_method ? ` · ${selectedBill.payment_method.toUpperCase()}` : ''}` : 'UNPAID'}</div>
             </div>
-
-            <div className="bill-actions">
-              <button
-                className="bill-action secondary"
-                onClick={() =>
-                  setSelectedBill(null)
-                }
-              >
-                Close
-              </button>
-
-              <button
-                className="bill-action print"
-                onClick={printBill}
-              >
-                🖨 Print Bill
-              </button>
+            <div className="bill-modal-foot">
+              <button className="bill-action light" onClick={() => setSelectedBill(null)}>Close</button>
+              <button className="bill-action primary" onClick={printBill}>Print Bill</button>
             </div>
           </div>
         </div>
       )}
 
-      {paymentOrder && (
-        <div className="payment-overlay">
+      {paymentBill && (
+        <div className="payment-overlay" onMouseDown={(e) => e.target === e.currentTarget && !paymentLoading && setPaymentBill(null)}>
           <div className="payment-modal">
-            <h3 className="payment-title">
-              Complete Payment
-            </h3>
-
-            <p className="payment-subtitle">
-              Confirm that the customer has paid
-              this bill.
-            </p>
-
-            <div className="payment-amount">
-              <small>Amount Received</small>
-              <strong>
-                {money(paymentOrder.total)}
-              </strong>
+            <h3>Complete Payment · Bill #{paymentBill.bill_number}</h3>
+            <p>Table {paymentBill.table_number} · Total {money(paymentBill.total)}</p>
+            <div className="payment-method-grid">
+              {['cash', 'upi', 'card'].map((method) => (
+                <button key={method} className={`payment-method ${paymentMethod === method ? 'active' : ''}`} onClick={() => setPaymentMethod(method)}>
+                  {method.toUpperCase()}
+                </button>
+              ))}
             </div>
-
-            <div className="payment-methods">
-              {[
-                ['cash', '💵 Cash'],
-                ['upi', '📱 UPI'],
-                ['card', '💳 Card'],
-              ].map(
-                ([value, label]) => (
-                  <button
-                    key={value}
-                    className={`payment-method ${
-                      paymentMethod === value
-                        ? 'selected'
-                        : ''
-                    }`}
-                    onClick={() =>
-                      setPaymentMethod(value)
-                    }
-                  >
-                    {label}
-                  </button>
-                )
-              )}
-            </div>
-
-            <div className="payment-actions">
-              <button
-                className="payment-button cancel"
-                onClick={() =>
-                  setPaymentOrder(null)
-                }
-                disabled={paymentLoading}
-              >
-                Cancel
-              </button>
-
-              <button
-                className="payment-button confirm"
-                onClick={markPaymentComplete}
-                disabled={paymentLoading}
-              >
-                {paymentLoading
-                  ? 'Saving...'
-                  : '✓ Confirm Payment'}
+            <div className="payment-foot">
+              <button className="bill-action light" disabled={paymentLoading} onClick={() => setPaymentBill(null)}>Cancel</button>
+              <button className="bill-action primary" disabled={paymentLoading} onClick={markPaymentComplete}>
+                {paymentLoading ? 'Saving…' : 'Confirm Paid'}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {billLoading && !selectedBill && <div />}
     </div>
   );
 }

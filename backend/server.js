@@ -11,6 +11,7 @@ const tableRoutes = require('./routes/tables');
 const orderRoutes = require('./routes/orders');
 const restaurantRoutes = require('./routes/restaurants');
 const salesRoutes = require('./routes/sales');
+const billRoutes = require('./routes/bills');
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.use('/api/tables', tableRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/sales', salesRoutes);
+app.use('/api/bills', billRoutes);
 
 app.get('/', (req, res) => {
   res.send('QR Restaurant Ordering API is running');
